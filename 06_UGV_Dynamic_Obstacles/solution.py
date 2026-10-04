@@ -1,241 +1,706 @@
 """
 Assignment 6 - UGV Navigation with Dynamic Obstacles
 
-Unlike the static version, the UGV does not know the complete
-obstacle map. Obstacles move/change during execution.
+The UGV does not initially know the complete obstacle map.
+Obstacles can move during execution.
 
-At every step:
+At each step:
 1. The UGV senses nearby obstacles.
-2. Newly observed obstacles are added to its internal map.
-3. A* replans a path from the current position.
-4. The UGV moves one step and the environment changes again.
+2. It plans a shortest path using A* and its current knowledge.
+3. The environment changes dynamically.
+4. If the next planned cell becomes blocked, the UGV detects
+   the unexpected obstacle and replans.
+5. Otherwise, the UGV moves one step.
 
-This is a simple model of online replanning.
+This demonstrates online path planning and replanning in
+a partially known dynamic environment.
 """
 
 import heapq
-import math
 import random
-import time
-
 import matplotlib.pyplot as plt
 
+
+# ================================================================
+# PARAMETERS
+# ================================================================
+
 SIZE = 50
+
 SENSE_RADIUS = 3
+
 INITIAL_DENSITY = 0.12
 
+DYNAMIC_MOVE_PROBABILITY = 0.25
+
+MAX_STEPS = 300
+
+# Fixed seed makes the experiment reproducible.
+RANDOM_SEED = 42
+
+
+# 8-connected movement
 MOVES = [
-    (-1, 0), (1, 0), (0, -1), (0, 1),
-    (-1, -1), (-1, 1), (1, -1), (1, 1),
+    (-1, 0),
+    (1, 0),
+    (0, -1),
+    (0, 1),
+    (-1, -1),
+    (-1, 1),
+    (1, -1),
+    (1, 1)
 ]
 
 
-def heuristic(a, b):
-    return max(abs(a[0] - b[0]), abs(a[1] - b[1]))
+# ================================================================
+# HEURISTIC
+# ================================================================
+
+def heuristic(current, goal):
+    """
+    Chebyshev distance heuristic for an 8-connected grid.
+    """
+
+    return max(
+        abs(current[0] - goal[0]),
+        abs(current[1] - goal[1])
+    )
 
 
-def inside(p):
-    return 0 <= p[0] < SIZE and 0 <= p[1] < SIZE
+# ================================================================
+# GRID CHECK
+# ================================================================
 
+def inside(position):
+    """
+    Check whether a grid position is inside the environment.
+    """
+
+    row, col = position
+
+    return (
+        0 <= row < SIZE
+        and 0 <= col < SIZE
+    )
+
+
+# ================================================================
+# A* SEARCH
+# ================================================================
 
 def astar(blocked, start, goal):
-    queue = [(heuristic(start, goal), 0, start)]
-    g = {start: 0}
-    parent = {start: None}
+    """
+    Find the shortest currently known path using A*.
 
-    while queue:
-        _, cost, current = heapq.heappop(queue)
+    The search uses only the obstacles currently known
+    to the UGV.
+    """
 
-        if cost != g.get(current):
+    priority_queue = [
+        (heuristic(start, goal), 0, start)
+    ]
+
+    g_cost = {
+        start: 0
+    }
+
+    parent = {
+        start: None
+    }
+
+    while priority_queue:
+
+        _, current_cost, current = heapq.heappop(
+            priority_queue
+        )
+
+        # Ignore outdated queue entries.
+        if current_cost != g_cost.get(current):
             continue
 
+        # Goal reached.
         if current == goal:
+
             path = []
+
             node = goal
+
             while node is not None:
+
                 path.append(node)
+
                 node = parent[node]
-            return list(reversed(path))
 
+            path.reverse()
+
+            return path
+
+        # Explore neighbours.
         for dr, dc in MOVES:
-            nxt = (current[0] + dr, current[1] + dc)
 
-            if not inside(nxt) or nxt in blocked:
+            next_cell = (
+                current[0] + dr,
+                current[1] + dc
+            )
+
+            if not inside(next_cell):
                 continue
 
-            new_cost = cost + 1
+            if next_cell in blocked:
+                continue
 
-            if new_cost < g.get(nxt, float("inf")):
-                g[nxt] = new_cost
-                parent[nxt] = current
+            new_cost = current_cost + 1
+
+            if new_cost < g_cost.get(
+                next_cell,
+                float("inf")
+            ):
+
+                g_cost[next_cell] = new_cost
+
+                parent[next_cell] = current
+
+                f_cost = (
+                    new_cost
+                    + heuristic(next_cell, goal)
+                )
+
                 heapq.heappush(
-                    queue, (new_cost + heuristic(nxt, goal), new_cost, nxt)
+                    priority_queue,
+                    (
+                        f_cost,
+                        new_cost,
+                        next_cell
+                    )
                 )
 
     return None
 
 
+# ================================================================
+# INITIAL ENVIRONMENT
+# ================================================================
+
 def generate_environment(seed):
+    """
+    Generate the actual environment containing obstacles.
+    """
+
     random.seed(seed)
+
     blocked = set()
 
-    for r in range(SIZE):
-        for c in range(SIZE):
+    for row in range(SIZE):
+
+        for col in range(SIZE):
+
             if random.random() < INITIAL_DENSITY:
-                blocked.add((r, c))
+
+                blocked.add((row, col))
 
     return blocked
 
 
-def move_dynamic_obstacles(blocked, start, goal):
-    # A fraction of obstacles move to neighbouring cells.
+# ================================================================
+# DYNAMIC OBSTACLE MOVEMENT
+# ================================================================
+
+def move_dynamic_obstacles(
+    actual_blocked,
+    start,
+    goal
+):
+    """
+    Move some obstacles to neighbouring cells.
+
+    The UGV does not know about these changes until it
+    senses the environment again.
+    """
+
     updated = set()
 
-    for obstacle in blocked:
+    for obstacle in actual_blocked:
+
+        # Never place an obstacle on the UGV
+        # or on the destination.
         if obstacle in (start, goal):
             continue
 
-        if random.random() < 0.25:
-            options = [
-                (obstacle[0] + dr, obstacle[1] + dc)
-                for dr, dc in MOVES
-                if inside((obstacle[0] + dr, obstacle[1] + dc))
-            ]
+        if random.random() < DYNAMIC_MOVE_PROBABILITY:
 
-            if options:
-                candidate = random.choice(options)
-                if candidate not in (start, goal):
-                    updated.add(candidate)
-                else:
-                    updated.add(obstacle)
+            possible_positions = []
+
+            for dr, dc in MOVES:
+
+                candidate = (
+                    obstacle[0] + dr,
+                    obstacle[1] + dc
+                )
+
+                if inside(candidate):
+
+                    if candidate not in (
+                        start,
+                        goal
+                    ):
+                        possible_positions.append(
+                            candidate
+                        )
+
+            if possible_positions:
+
+                new_position = random.choice(
+                    possible_positions
+                )
+
+                updated.add(new_position)
+
             else:
+
                 updated.add(obstacle)
+
         else:
+
             updated.add(obstacle)
 
     return updated
 
 
-def sense_obstacles(actual_blocked, position):
-    known = set()
+# ================================================================
+# OBSTACLE SENSING
+# ================================================================
+
+def sense_obstacles(
+    actual_blocked,
+    position
+):
+    """
+    Detect obstacles within the UGV's sensing radius.
+    """
+
+    detected = set()
 
     for obstacle in actual_blocked:
+
+        row_distance = abs(
+            obstacle[0] - position[0]
+        )
+
+        col_distance = abs(
+            obstacle[1] - position[1]
+        )
+
         if (
-            abs(obstacle[0] - position[0]) <= SENSE_RADIUS
-            and abs(obstacle[1] - position[1]) <= SENSE_RADIUS
+            row_distance <= SENSE_RADIUS
+            and col_distance <= SENSE_RADIUS
         ):
-            known.add(obstacle)
 
-    return known
+            detected.add(obstacle)
+
+    return detected
 
 
-def plot_environment(actual, known, path, start, goal, current):
-    plt.figure(figsize=(8, 8))
+# ================================================================
+# VISUALIZATION
+# ================================================================
 
-    if actual:
-        x = [c for r, c in actual]
-        y = [SIZE - 1 - r for r, c in actual]
-        plt.scatter(x, y, s=8, marker="s", alpha=0.25, label="Actual obstacles")
+def plot_environment(
+    actual_obstacles,
+    known_obstacles,
+    trajectory,
+    current_path,
+    start,
+    goal,
+    current
+):
+    """
+    Display the actual environment, known obstacles,
+    travelled trajectory and current planned path.
+    """
 
-    if known:
-        x = [c for r, c in known]
-        y = [SIZE - 1 - r for r, c in known]
-        plt.scatter(x, y, s=18, marker="s", label="Known obstacles")
+    plt.figure(figsize=(9, 9))
 
-    if path:
-        x = [c for r, c in path]
-        y = [SIZE - 1 - r for r, c in path]
-        plt.plot(x, y, linewidth=2, label="Current planned path")
+    # ------------------------------------------------------------
+    # Actual obstacles
+    # ------------------------------------------------------------
 
-    plt.scatter([start[1]], [SIZE - 1 - start[0]], s=80, label="Start")
-    plt.scatter([goal[1]], [SIZE - 1 - goal[0]], s=100, marker="*", label="Goal")
-    plt.scatter([current[1]], [SIZE - 1 - current[0]], s=70, label="UGV")
+    if actual_obstacles:
 
-    plt.title("UGV Dynamic Obstacle Navigation")
+        x_actual = [
+            col
+            for row, col in actual_obstacles
+        ]
+
+        y_actual = [
+            SIZE - 1 - row
+            for row, col in actual_obstacles
+        ]
+
+        plt.scatter(
+            x_actual,
+            y_actual,
+            s=12,
+            marker="s",
+            alpha=0.25,
+            label="Actual obstacles"
+        )
+
+    # ------------------------------------------------------------
+    # Obstacles known to UGV
+    # ------------------------------------------------------------
+
+    if known_obstacles:
+
+        x_known = [
+            col
+            for row, col in known_obstacles
+        ]
+
+        y_known = [
+            SIZE - 1 - row
+            for row, col in known_obstacles
+        ]
+
+        plt.scatter(
+            x_known,
+            y_known,
+            s=20,
+            marker="s",
+            label="Known obstacles"
+        )
+
+    # ------------------------------------------------------------
+    # UGV travelled trajectory
+    # ------------------------------------------------------------
+
+    if len(trajectory) > 1:
+
+        x_trajectory = [
+            col
+            for row, col in trajectory
+        ]
+
+        y_trajectory = [
+            SIZE - 1 - row
+            for row, col in trajectory
+        ]
+
+        plt.plot(
+            x_trajectory,
+            y_trajectory,
+            linewidth=2,
+            label="UGV trajectory"
+        )
+
+    # ------------------------------------------------------------
+    # Current planned path
+    # ------------------------------------------------------------
+
+    if current_path:
+
+        x_path = [
+            col
+            for row, col in current_path
+        ]
+
+        y_path = [
+            SIZE - 1 - row
+            for row, col in current_path
+        ]
+
+        plt.plot(
+            x_path,
+            y_path,
+            linestyle="--",
+            linewidth=1.5,
+            label="Current planned path"
+        )
+
+    # ------------------------------------------------------------
+    # Start
+    # ------------------------------------------------------------
+
+    plt.scatter(
+        [start[1]],
+        [SIZE - 1 - start[0]],
+        s=100,
+        label="Start"
+    )
+
+    # ------------------------------------------------------------
+    # Goal
+    # ------------------------------------------------------------
+
+    plt.scatter(
+        [goal[1]],
+        [SIZE - 1 - goal[0]],
+        s=130,
+        marker="*",
+        label="Goal"
+    )
+
+    # ------------------------------------------------------------
+    # Current UGV position
+    # ------------------------------------------------------------
+
+    plt.scatter(
+        [current[1]],
+        [SIZE - 1 - current[0]],
+        s=80,
+        marker="o",
+        label="UGV"
+    )
+
+    plt.title(
+        "UGV Dynamic Obstacle Navigation"
+    )
+
     plt.xlabel("X")
+
     plt.ylabel("Y")
-    plt.legend()
+
     plt.grid(alpha=0.2)
+
+    plt.legend()
+
     plt.tight_layout()
+
     plt.show()
 
 
+# ================================================================
+# MAIN SIMULATION
+# ================================================================
+
 def main():
-    random.seed()
+
+    # ------------------------------------------------------------
+    # Start and goal
+    # ------------------------------------------------------------
+
     start = (2, 2)
-    goal = (SIZE - 3, SIZE - 3)
 
-    actual_blocked = generate_environment(int(time.time()) % 100000)
-    actual_blocked.discard(start)
-    actual_blocked.discard(goal)
-
-    known_blocked = set()
-    current = start
-    travelled = 0
-    replans = 0
-    collision_avoided = 0
-    trajectory = [current]
-
-    max_steps = 300
-
-    for step in range(max_steps):
-        if current == goal:
-            break
-
-        # Sense the environment around the current position.
-        newly_seen = sense_obstacles(actual_blocked, current)
-        known_blocked.update(newly_seen)
-
-        # Plan using only the information available to the UGV.
-        path = astar(known_blocked, current, goal)
-        replans += 1
-
-        if not path:
-            print("No route is currently known. Waiting and sensing again...")
-            actual_blocked = move_dynamic_obstacles(
-                actual_blocked, current, goal
-            )
-            continue
-
-        # Move one cell along the current plan.
-        next_position = path[1] if len(path) > 1 else current
-
-        if next_position in actual_blocked:
-            # The obstacle was not known when the previous plan was made.
-            known_blocked.add(next_position)
-            collision_avoided += 1
-            actual_blocked = move_dynamic_obstacles(
-                actual_blocked, current, goal
-            )
-            continue
-
-        current = next_position
-        travelled += 1
-        trajectory.append(current)
-
-        # Dynamic environment changes after movement.
-        actual_blocked = move_dynamic_obstacles(
-            actual_blocked, current, goal
-        )
-
-    success = current == goal
-
-    print("\nDYNAMIC UGV RESULTS")
-    print("-" * 35)
-    print("Goal reached       :", success)
-    print("Steps travelled    :", travelled)
-    print("Replanning count   :", replans)
-    print("Unexpected blocks  :", collision_avoided)
-    print("Final position     :", current)
-    print("Known obstacles    :", len(known_blocked))
-
-    # Plot the final state and the last planned route.
-    final_path = astar(known_blocked, current, goal) if not success else [current]
-    plot_environment(
-        actual_blocked, known_blocked, final_path,
-        start, goal, current
+    goal = (
+        SIZE - 3,
+        SIZE - 3
     )
 
+    # ------------------------------------------------------------
+    # Generate actual environment
+    # ------------------------------------------------------------
+
+    actual_obstacles = generate_environment(
+        RANDOM_SEED
+    )
+
+    actual_obstacles.discard(start)
+
+    actual_obstacles.discard(goal)
+
+    # ------------------------------------------------------------
+    # UGV initially knows nothing about obstacles.
+    # ------------------------------------------------------------
+
+    known_obstacles = set()
+
+    current = start
+
+    travelled = 0
+
+    replanning_count = 0
+
+    unexpected_blocks = 0
+
+    trajectory = [current]
+
+    current_path = None
+
+    # ============================================================
+    # NAVIGATION LOOP
+    # ============================================================
+
+    for step in range(MAX_STEPS):
+
+        # --------------------------------------------------------
+        # Check whether destination has been reached.
+        # --------------------------------------------------------
+
+        if current == goal:
+
+            break
+
+        # --------------------------------------------------------
+        # Sense nearby obstacles.
+        # --------------------------------------------------------
+
+        newly_detected = sense_obstacles(
+            actual_obstacles,
+            current
+        )
+
+        known_obstacles.update(
+            newly_detected
+        )
+
+        # --------------------------------------------------------
+        # Plan using currently known information.
+        # --------------------------------------------------------
+
+        current_path = astar(
+            known_obstacles,
+            current,
+            goal
+        )
+
+        replanning_count += 1
+
+        # --------------------------------------------------------
+        # No currently known path.
+        # --------------------------------------------------------
+
+        if not current_path:
+
+            actual_obstacles = move_dynamic_obstacles(
+                actual_obstacles,
+                current,
+                goal
+            )
+
+            continue
+
+        # --------------------------------------------------------
+        # Determine next movement.
+        # --------------------------------------------------------
+
+        if len(current_path) > 1:
+
+            next_position = current_path[1]
+
+        else:
+
+            next_position = current
+
+        # --------------------------------------------------------
+        # IMPORTANT:
+        # Dynamic environment changes AFTER planning but
+        # BEFORE movement.
+        # --------------------------------------------------------
+
+        actual_obstacles = move_dynamic_obstacles(
+            actual_obstacles,
+            current,
+            goal
+        )
+
+        # --------------------------------------------------------
+        # Check whether the planned next cell became blocked.
+        # --------------------------------------------------------
+
+        if next_position in actual_obstacles:
+
+            # Newly discovered dynamic obstacle.
+            known_obstacles.add(
+                next_position
+            )
+
+            unexpected_blocks += 1
+
+            # Stay in current position.
+            # The next iteration will replan.
+            continue
+
+        # --------------------------------------------------------
+        # Move UGV.
+        # --------------------------------------------------------
+
+        current = next_position
+
+        travelled += 1
+
+        trajectory.append(current)
+
+    # ============================================================
+    # FINAL RESULTS
+    # ============================================================
+
+    success = (
+        current == goal
+    )
+
+    # Calculate final known path if possible.
+    if success:
+
+        final_path = [current]
+
+    else:
+
+        final_path = astar(
+            known_obstacles,
+            current,
+            goal
+        )
+
+    print("\nDYNAMIC UGV RESULTS")
+    print("-" * 40)
+
+    print(
+        "Goal reached       :",
+        success
+    )
+
+    print(
+        "Steps travelled    :",
+        travelled
+    )
+
+    print(
+        "Replanning count   :",
+        replanning_count
+    )
+
+    print(
+        "Unexpected blocks  :",
+        unexpected_blocks
+    )
+
+    print(
+        "Final position     :",
+        current
+    )
+
+    print(
+        "Known obstacles    :",
+        len(known_obstacles)
+    )
+
+    print(
+        "Actual obstacles   :",
+        len(actual_obstacles)
+    )
+
+    print(
+        "Trajectory cells   :",
+        len(trajectory)
+    )
+
+    # ------------------------------------------------------------
+    # Plot final environment
+    # ------------------------------------------------------------
+
+    plot_environment(
+        actual_obstacles,
+        known_obstacles,
+        trajectory,
+        final_path,
+        start,
+        goal,
+        current
+    )
+
+
+# ================================================================
+# PROGRAM ENTRY POINT
+# ================================================================
 
 if __name__ == "__main__":
     main()
