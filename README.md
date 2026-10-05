@@ -1,4 +1,4 @@
-# Artificial Intelligence - Assignment 2
+# Artificial Intelligence - Assignment 
 
 This repository contains the programming implementations for the AI assignment.
 
@@ -42,6 +42,9 @@ This repository contains the programming implementations for the AI assignment.
 
 8. Map coloring for Telangana districts
 
+9. Intelligent sleep agent
+
+10. AQI calculation
 ## Folder structure
 
 ```text
@@ -53,6 +56,8 @@ This repository contains the programming implementations for the AI assignment.
 06_ugv_dynamic/
 07_indian_route_search/
 08_ts_map_coloring/
+09_intelligent_sleep_agent/
+10_aqi_calculation/
 ```
 
 Each assignment folder contains one main Python program and a short README.
